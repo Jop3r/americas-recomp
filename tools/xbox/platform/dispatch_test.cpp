@@ -17,13 +17,17 @@ static const UINT U0_BYTES = 4u << 20, U1_BYTES = 8u << 20;
 
 static std::vector<uint8_t> Run(bool warp, const std::vector<char>& dxil, UINT groups, uint32_t seed, std::vector<uint8_t>& u0out, bool& ok, char* name) {
     ok = false;
-    ComPtr<IDXGIFactory4> fac; CreateDXGIFactory1(IID_PPV_ARGS(&fac));
+    ComPtr<IDXGIFactory4> fac;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&fac));
+    if (FAILED(hr)) { fprintf(stderr, "DXGI factory creation failed 0x%08x\n", (unsigned)hr); return {}; }
     ComPtr<IDXGIAdapter> ad;
-    if (warp) fac->EnumWarpAdapter(IID_PPV_ARGS(&ad)); else fac->EnumAdapters(0, &ad);
+    hr = warp ? fac->EnumWarpAdapter(IID_PPV_ARGS(&ad)) : fac->EnumAdapters(0, &ad);
+    if (FAILED(hr)) { fprintf(stderr, "%s adapter enumeration failed 0x%08x\n", warp ? "WARP" : "GPU", (unsigned)hr); return {}; }
     DXGI_ADAPTER_DESC d; ad->GetDesc(&d); WideCharToMultiByte(CP_ACP, 0, d.Description, -1, name, 128, 0, 0);
     fprintf(stderr, "adapter: %s\n", name);
     ComPtr<ID3D12Device> dev;
-    if (FAILED(D3D12CreateDevice(ad.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&dev)))) return {};
+    hr = D3D12CreateDevice(ad.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&dev));
+    if (FAILED(hr)) { fprintf(stderr, "D3D12 device creation failed 0x%08x\n", (unsigned)hr); return {}; }
 
     // raw UAVs through a descriptor table: unlike root UAVs they are bounds-checked, which matters because the shader follows pointers read from the data
     D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 0};
@@ -47,7 +51,7 @@ static std::vector<uint8_t> Run(bool warp, const std::vector<char>& dxil, UINT g
     ComPtr<ID3D12RootSignature> sig; dev->CreateRootSignature(0, sb->GetBufferPointer(), sb->GetBufferSize(), IID_PPV_ARGS(&sig));
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {}; pd.pRootSignature = sig.Get(); pd.CS = {dxil.data(), dxil.size()};
     ComPtr<ID3D12PipelineState> pso;
-    HRESULT hr = dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso));
+    hr = dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso));
     if (FAILED(hr)) { printf("  pipeline creation failed 0x%08x\n", (unsigned)hr); return {}; }
 
     auto mk = [&](UINT bytes, D3D12_HEAP_TYPE ht, D3D12_RESOURCE_FLAGS fl, D3D12_RESOURCE_STATES st) {
@@ -132,7 +136,10 @@ static uint64_t Fnv(const std::vector<uint8_t>& v) { uint64_t h = 14695981039346
 int main(int argc, char** argv) {
     setvbuf(stdout, 0, _IONBF, 0);
     if (argc < 2) { printf("usage: dispatch_test shader.dxil [groups] [seed]\n"); return 2; }
-    std::ifstream f(argv[1], std::ios::binary); std::vector<char> dxil((std::istreambuf_iterator<char>(f)), {});
+    std::ifstream f(argv[1], std::ios::binary);
+    if (!f) { fprintf(stderr, "cannot open shader: %s\n", argv[1]); return 2; }
+    std::vector<char> dxil((std::istreambuf_iterator<char>(f)), {});
+    if (dxil.empty()) { fprintf(stderr, "empty shader: %s\n", argv[1]); return 2; }
     UINT groups = argc > 2 ? atoi(argv[2]) : 4; uint32_t seed = argc > 3 ? atoi(argv[3]) : 1;
     std::vector<uint8_t> r[2], r0[2]; bool ok[2]; char name[2][128] = {};
     for (int w = 0; w < 2; w++) {
@@ -146,5 +153,5 @@ int main(int argc, char** argv) {
         printf("%zu of %zu output words differ between the adapters%s", diff, r[0].size() / 4, diff ? "" : "\n");
         if (diff) printf(" (first at byte %zu: %08x vs %08x)\n", first, *(uint32_t*)&r[0][first], *(uint32_t*)&r[1][first]);
     }
-    return 0;
+    return ok[0] && ok[1] ? 0 : 1;
 }
